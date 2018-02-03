@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-
-"""
-
 from pox.core import core
 from pprint import pprint
 # IPAddr is IPv4 address, fucking docs !!!
@@ -33,7 +29,7 @@ import csv
 log = core.getLogger()
 
 
-class Tutorial (object):
+class Firewall (object):
     def __init__(self, connection):
         self.connection = connection
         connection.addListeners(self)
@@ -42,21 +38,16 @@ class Tutorial (object):
         self.firewall = read_firewall_rules()
 
     def can_send_packet(self, packet, packet_in, layers234_data):
-        # log.debug(bcolors.YELLOW + "Checking firewall rules against:" + bcolors.WHITE)
-        # log.debug(layers234_data)
         for rule in self.firewall:
-            if l2_rule(rule) and match_src_mac(
-                    rule, layers234_data) and match_dst_mac(
-                    rule, layers234_data):
-                return boolean_with_log(
-                    rule[4] == 'allow', '==============(Rule matched) %s %s , Due to rule %s' %
-                    (blue('Layer 2 '), yellow(str(layers234_data)), blue(str(rule))), 'Allow', 'Drop')
+            if l2_rule(rule) and match_src_mac(rule, layers234_data) and match_dst_mac(rule, layers234_data):
+                log.debug('==============(Rule matched) \n %s %s \n ===> Dropping packet %s',
+                    yellow(str(rule)), blue('Layer 2'), underline(yellow(str(layers234_data))))
+                return False
             elif l34_rule(rule) and match_src_ip(rule, layers234_data) and match_dst_ip(rule, layers234_data) and match_dst_port(rule, layers234_data):
-                return boolean_with_log(
-                    rule[4] == 'allow', '==============(Rule matched) %s %s , Due to rule %s' %
-                    (blue('Layer 3/4 '), yellow(str(layers234_data)), blue(str(rule))), 'Allow', 'Drop')
-        log.debug(yellow('Matched NO rules, allowing by default:'))
-        log.debug(underline(str(layers234_data)))
+                log.debug('==============(Rule matched) \n %s %s \n ===> Dropping packet %s',
+                    yellow(str(rule)), blue('Layer 3/4'), underline(yellow(str(layers234_data))))
+                return False
+        log.debug('%s %s', yellow('Matched NO rules, allowing by default:'), green(str(layers234_data)))
         return True
 
     def resend_packet(self, packet_in, out_port):
@@ -128,7 +119,7 @@ class Tutorial (object):
 def launch():
     def start_switch(event):
         log.debug("Controlling %s" % (event.connection,))
-        Tutorial(event.connection)
+        Firewall(event.connection)
     core.openflow.addListenerByName("ConnectionUp", start_switch)
 
 
@@ -140,6 +131,7 @@ def launch():
 def read_firewall_rules():
     firewall = []
     with open('pox/misc/firewall.csv', 'rb') as csvfile:
+        log.debug(yellow('Added firewall rules:'))
         for rule in csv.reader(csvfile, delimiter=','):
             if rule[0] == 'mac':
                 if rule[1] != '*':
@@ -152,10 +144,10 @@ def read_firewall_rules():
                 if rule[2] != '*':
                     rule[2] = IPAddr(rule[2])
             else:
-                log.debug('Skipping wrongly formatted rule: ' + ','.join(rule))
+                log.debug(yellow('Skipping wrongly formatted rule:' + ','.join(rule)))
                 continue
+            log.debug(blue(str(rule)))
             firewall.append(rule)
-    log.debug(blue(str(firewall)))
     return firewall
 
 
