@@ -23,7 +23,6 @@ import csv
 # Ether any
 # Transport
 # act like a switch
-# Both direction
 # IPv6
 
 log = core.getLogger()
@@ -39,13 +38,16 @@ class Firewall (object):
 
     def can_send_packet(self, packet, packet_in, layers234_data):
         for rule in self.firewall:
-            if l2_rule(rule) and match_src_mac(rule, layers234_data) and match_dst_mac(rule, layers234_data):
+            if l2_rule(rule) and match_mac(rule, layers234_data):
                 log.debug('==============(Rule matched) \n %s %s \n ===> Dropping packet %s',
                     yellow(str(rule)), blue('Layer 2'), underline(yellow(str(layers234_data))))
                 return False
-            elif l34_rule(rule) and match_src_ip(rule, layers234_data) and match_dst_ip(rule, layers234_data) and match_dst_port(rule, layers234_data):
-                log.debug('==============(Rule matched) \n %s %s \n ===> Dropping packet %s',
-                    yellow(str(rule)), blue('Layer 3/4'), underline(yellow(str(layers234_data))))
+            elif l34_rule(rule) and match_ip(rule, layers234_data) and match_dst_port(rule, layers234_data):
+                layer = '4'
+                if rule[3] == '*' or rule[3] == '':
+                     layer = '3'
+                log.debug('==============(Rule matched) \n %s Layer %s \n ===> Dropping packet %s',
+                    yellow(str(rule)), blue(layer), underline(yellow(str(layers234_data))))
                 return False
         log.debug('%s %s', yellow('Matched NO rules, allowing by default:'), green(str(layers234_data)))
         return True
@@ -183,44 +185,26 @@ def l34_rule(rule):
     return rule[0] == 'ip'
 
 
-def match_src_mac(rule, layers234_data):
-    if isinstance(rule[1], str) and rule[1] == '*':
+def match_mac(rule, layers234_data):
+    if (isinstance(rule[1], str) and rule[1] == '*') or (isinstance(rule[2], str) and rule[2] == '*'):
         return True
 
-    if 'src_mac' in layers234_data:
-        return rule[1] == layers234_data['src_mac']
+    if 'src_mac' in layers234_data and 'dst_mac' in layers234_data:
+        return (rule[1] == layers234_data['src_mac'] and rule[2] == layers234_data['dst_mac']) or (rule[2] == layers234_data['src_mac'] and rule[1] == layers234_data['dst_mac'])
     return False
 
 
-def match_dst_mac(rule, layers234_data):
-    if isinstance(rule[2], str) and rule[2] == '*':
+def match_ip(rule, layers234_data):
+    if (isinstance(rule[1], str) and rule[1] == '*') or (isinstance(rule[2], str) and rule[2] == '*'):
         return True
 
-    if 'dst_mac' in layers234_data:
-        return rule[2] == layers234_data['dst_mac']
-    return False
-
-
-def match_src_ip(rule, layers234_data):
-    if isinstance(rule[1], str) and rule[1] == '*':
-        return True
-
-    if 'src_ip' in layers234_data:
-        return rule[1] == layers234_data['src_ip']
-    return False
-
-
-def match_dst_ip(rule, layers234_data):
-    if isinstance(rule[2], str) and rule[2] == '*':
-        return True
-
-    if 'dst_ip' in layers234_data:
-        return rule[2] == layers234_data['dst_ip']
+    if 'src_ip' in layers234_data and 'dst_ip' in layers234_data:
+        return (rule[1] == layers234_data['src_ip'] and rule[2] == layers234_data['dst_ip']) or (rule[2] == layers234_data['src_ip'] and rule[1] == layers234_data['dst_ip'])
     return False
 
 
 def match_dst_port(rule, layers234_data):
-    if rule[3] == '*':
+    if rule[3] == '*' or rule[3] == '':
         return True
 
     if 'dst_port' in layers234_data:
