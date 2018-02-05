@@ -14,16 +14,11 @@
 
 from pox.core import core
 from pprint import pprint
-# IPAddr is IPv4 address, fucking docs !!!
-from pox.lib.addresses import EthAddr, IPAddr, IPAddr6
+# IPAddr is only IPv4 address!!!
+from pox.lib.addresses import EthAddr, IPAddr
 import pox.openflow.libopenflow_01 as of
 import csv
-
-# TODO:
-# Ether any
-# Transport
-# act like a switch
-# IPv6
+import datetime
 
 log = core.getLogger()
 
@@ -33,78 +28,78 @@ class Firewall (object):
         self.connection = connection
         connection.addListeners(self)
         self.mac_to_port = {}
+        log.debug('MAC table setup')
         log.debug('Parsing firewall rules')
         self.firewall = read_firewall_rules()
 
-    def can_send_packet(self, packet, packet_in, layers234_data):
+    def allowed_by_firewall(self, layers234_data):
         for rule in self.firewall:
+            blocked = False
+            layer = '2' # for logging, default to layer 2
             if l2_rule(rule) and match_mac(rule, layers234_data):
-                log.debug('==============(Rule matched) \n %s %s \n ===> Dropping packet %s',
-                    yellow(str(rule)), blue('Layer 2'), underline(yellow(str(layers234_data))))
-                return False
+                blocked = True
             elif l34_rule(rule) and match_ip(rule, layers234_data) and match_dst_port(rule, layers234_data):
-                layer = '4'
-                if rule[3] == '*' or rule[3] == '':
-                     layer = '3'
-                log.debug('==============(Rule matched) \n %s Layer %s \n ===> Dropping packet %s',
-                    yellow(str(rule)), blue(layer), underline(yellow(str(layers234_data))))
+                blocked = True
+                layer = '3'
+                if len(rule) > 3:
+                    try:
+                        int(rule[3])
+                        layer = '4'
+                    except ValueError:
+                        log.debug('Cannot parse port in rule ===> it is a layer 3 rule')
+
+            if blocked:
+                log.debug(
+                        '==============(Rule matched) \n %s Layer %s \n ===> Dropping packet %s', yellow(str(rule)), blue(layer), underline(yellow(str(layers234_data))))
                 return False
-        log.debug('%s %s', yellow('Matched NO rules, allowing by default:'), green(str(layers234_data)))
+
+        log.debug(
+            '%s %s',
+            yellow('Matched NO rules, allowing by default:'),
+            green(str(layers234_data)))
         return True
 
     def resend_packet(self, packet_in, out_port):
         msg = of.ofp_packet_out()
         msg.data = packet_in
-
-        # Add an action to send to the specified port
         action = of.ofp_action_output(port=out_port)
         msg.actions.append(action)
-
-        # Send message to switch
         self.connection.send(msg)
 
-    def act_like_hub(self, packet, packet_in, layers234_data):
-        """
-        Implement hub-like behavior -- send all packets to all ports besides
-        the input port.
-        """
-        if self.can_send_packet(packet, packet_in, layers234_data):
-            self.resend_packet(packet_in, of.OFPP_ALL)
-        # self.resend_packet(packet_in, of.OFPP_ALL)
+    def act_like_switch(self, packet, packet_in, layers234_data):
+        log.debug("packet_in.in_port " + str(packet_in.in_port))
 
-    def act_like_switch(self, packet, packet_in):
-        # Learn the port for the source MAC
-        if packet.src not in self.mac_to_port:
-            log.debug(
-                "Learned %s from Port %d!" %
-                (packet.src, packet_in.in_port))
-            self.mac_to_port[packet.src] = packet_in.in_port
+        self.mac_to_port[str(packet.src)] = packet_in.in_port
 
-        if packet.dst in self.mac_to_port:
-            # Send packet out the associated port
-            log.debug("CAM table hit, sending out packet to Port %d" %
-                      self.mac_to_port[packet.dst])
-            self.resend_packet(packet_in, self.mac_to_port[packet.dst])
+        # Firewall functionality (start)
+        if not self.allowed_by_firewall(layers234_data):
+            log.warning("Ignoring packet blocked by firewall")
+            return
+        # Firewall functionality (end)
 
-            log.debug("Installing flow ...")
-            #log.debug("MATCH: In Port =  %s" % packet_in.in_port)
-            # log.debug("MATCH: Source MAC =  %s" % packet.src)
-            log.debug("MATCH: Destination MAC =  %s" % packet.dst)
-            log.debug("ACTION: Out Port =  %s" % self.mac_to_port[packet.dst])
+        if str(packet.dst) in self.mac_to_port:
 
-            msg = of.ofp_flow_mod()
-            #msg.match.in_port = self.mac_to_port[packet.src]
-            #msg.match.dl_src = packet.src
-            msg.match.dl_dst = packet.dst
+            ### Timestamps for Debugging    ###
+            time = datetime.datetime.now().strftime('%H:%M:%S')
+            log.debug("%s: Installing flow... %s-%i => %s-%i" % (time,
+                                                                 packet.src,
+                                                                 packet_in.in_port,
+                                                                 packet.dst,
+                                                                 self.mac_to_port[str(packet.dst)]))
+
+            msg = of.ofp_flow_mod()  # Start Modifying the flow
+            msg.match = of.ofp_match.from_packet(packet)
+            msg.idle_timeout = 10
+            msg.hard_timeout = 30
             msg.actions.append(of.ofp_action_output(
-                port=self.mac_to_port[packet.dst]))
-            msg.idle_timeout = 60
-            msg.hard_timeout = 600
-            # msg.buffer_id = packet_in.buffer_id
-            self.connection.send(msg)
+                port=self.mac_to_port[str(packet.dst)]))
+            msg.buffer_id = packet_in.buffer_id
+
+            self.connection.send(msg)  # Set the modification
 
         else:
             # Flood the packet out everything but the input port
+            log.debug(underline(green('Flood')))
             self.resend_packet(packet_in, of.OFPP_ALL)
 
     def _handle_PacketIn(self, event):
@@ -114,8 +109,7 @@ class Firewall (object):
             return
         packet_in = event.ofp
 
-        self.act_like_hub(packet, packet_in, get_layers_234_data(packet))
-        #self.act_like_switch(packet, packet_in)
+        self.act_like_switch(packet, packet_in, get_layers_234_data(packet))
 
 
 def launch():
@@ -131,22 +125,32 @@ def launch():
 
 
 def read_firewall_rules():
+    # array of rules
     firewall = []
     with open('pox/misc/firewall.csv', 'rb') as csvfile:
         log.debug(yellow('Added firewall rules:'))
         for rule in csv.reader(csvfile, delimiter=','):
+            if len(rule) == 0:
+                continue
             if rule[0] == 'mac':
                 if rule[1] != '*':
+                    # Parse the MAC address in the rule in to an EthAddr object
                     rule[1] = EthAddr(rule[1])
                 if rule[2] != '*':
+                    # Parse the MAC address in the rule in to an EthAddr object
                     rule[2] = EthAddr(rule[2])
             elif rule[0] == 'ip':
                 if rule[1] != '*':
+                    # Parse the IP address in the rule in to an IPAddr object
                     rule[1] = IPAddr(rule[1])
                 if rule[2] != '*':
+                    # Parse the IP address in the rule in to an IPAddr object
                     rule[2] = IPAddr(rule[2])
             else:
-                log.debug(yellow('Skipping wrongly formatted rule:' + ','.join(rule)))
+                log.debug(
+                    yellow(
+                        'Skipping wrongly formatted rule:' +
+                        ','.join(rule)))
                 continue
             log.debug(blue(str(rule)))
             firewall.append(rule)
@@ -157,53 +161,68 @@ def get_layers_234_data(packet):
     layers234_data = {}
     layer2 = packet
     if hasattr(layer2, 'src'):
+        # Collect source MAC address
         layers234_data['src_mac'] = layer2.src
     if hasattr(layer2, 'dst'):
+        # Collect destination MAC address
         layers234_data['dst_mac'] = layer2.dst
     if hasattr(layer2, 'next'):
         layer3 = layer2.next
         if hasattr(layer3, 'srcip'):
             if isinstance(layer3.srcip, IPAddr):
+                # Collect source IP address
                 layers234_data['src_ip'] = layer3.srcip
         if hasattr(layer3, 'dstip'):
             if isinstance(layer3.dstip, IPAddr):
+                # Collect destination IP address
                 layers234_data['dst_ip'] = layer3.dstip
         if hasattr(layer3, 'next'):
             layer4 = layer3.next
-            # if hasattr(layer4, 'srcport'):
-            #   layers234_data['src_port'] = layer4.srcport
             if hasattr(layer4, 'dstport'):
+                # Collect destination port
                 layers234_data['dst_port'] = layer4.dstport
     return layers234_data
 
 
 def l2_rule(rule):
+    # rule is a layer 2 rule
     return rule[0] == 'mac'
 
 
 def l34_rule(rule):
+    # rule is either a layer 3 or layer 4 rule
     return rule[0] == 'ip'
 
 
 def match_mac(rule, layers234_data):
-    if (isinstance(rule[1], str) and rule[1] == '*') or (isinstance(rule[2], str) and rule[2] == '*'):
+    # Check whether object is a string first because it can be an EthAddr object
+    if (isinstance(rule[1], str) and rule[1] ==
+            '*') or (isinstance(rule[2], str) and rule[2] == '*'):
         return True
 
     if 'src_mac' in layers234_data and 'dst_mac' in layers234_data:
-        return (rule[1] == layers234_data['src_mac'] and rule[2] == layers234_data['dst_mac']) or (rule[2] == layers234_data['src_mac'] and rule[1] == layers234_data['dst_mac'])
+        return (rule[1] == layers234_data['src_mac'] and rule[2] == layers234_data['dst_mac']) or (
+            rule[2] == layers234_data['src_mac'] and rule[1] == layers234_data['dst_mac'])
     return False
 
 
 def match_ip(rule, layers234_data):
-    if (isinstance(rule[1], str) and rule[1] == '*') or (isinstance(rule[2], str) and rule[2] == '*'):
+    # Check whether object is a string first because it can be an IPAddr object
+    if (isinstance(rule[1], str) and rule[1] ==
+            '*') or (isinstance(rule[2], str) and rule[2] == '*'):
         return True
 
     if 'src_ip' in layers234_data and 'dst_ip' in layers234_data:
-        return (rule[1] == layers234_data['src_ip'] and rule[2] == layers234_data['dst_ip']) or (rule[2] == layers234_data['src_ip'] and rule[1] == layers234_data['dst_ip'])
+        return (rule[1] == layers234_data['src_ip'] and rule[2] == layers234_data['dst_ip']) or (
+            rule[2] == layers234_data['src_ip'] and rule[1] == layers234_data['dst_ip'])
     return False
 
 
 def match_dst_port(rule, layers234_data):
+    if len(rule) <= 3:
+        # In case the port is not specified in the rule
+        return True
+
     if rule[3] == '*' or rule[3] == '':
         return True
 
@@ -219,10 +238,6 @@ def match_dst_port(rule, layers234_data):
 # ==================================
 
 
-def header(msg):
-    return '\033[95m' + msg + '\033[0m'
-
-
 def blue(msg):
     return '\033[94m' + msg + '\033[0m'
 
@@ -235,38 +250,14 @@ def yellow(msg):
     return '\033[93m' + msg + '\033[0m'
 
 
-def red(msg):
-    return '\033[91m' + msg + '\033[0m'
-
-
-def white(msg):
-    return '\033[0m' + msg + '\033[0m'
-
-
-def bold(msg):
-    return '\033[1m' + msg + '\033[0m'
-
-
 def underline(msg):
     return '\033[4m' + msg + '\033[0m'
 
 
-def boolean_with_log(boolean, msg, true_msg=None, false_msg=None):
-    if isinstance(msg, str):
-        msg = yellow(msg)
-    log.debug(msg)
-    if boolean:
-        if isinstance(true_msg, str):
-            true_msg = green(true_msg)
-        log.debug(true_msg)
-    else:
-        if isinstance(false_msg, str):
-            false_msg = red(false_msg)
-        log.debug(false_msg)
-    return boolean
-
-
 def inspect_object(obj):
+    """
+    For inspecting packet object
+    """
     pprint(vars(obj))
 
 # ==================================
